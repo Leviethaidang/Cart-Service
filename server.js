@@ -142,6 +142,24 @@ async function authMiddleware(req, res, next) {
     }
 }
 
+function internalMiddleware(req, res, next) {
+    const internalApiKey = req.headers["x-internal-api-key"];
+
+    if (!process.env.INTERNAL_API_KEY) {
+        return res.status(500).json({
+            error: "Cart Service chưa cấu hình INTERNAL_API_KEY!"
+        });
+    }
+
+    if (internalApiKey !== process.env.INTERNAL_API_KEY) {
+        return res.status(403).json({
+            error: "Internal API key không hợp lệ!"
+        });
+    }
+
+    next();
+}
+
 // =========================================================================
 // ROUTE 1: THÊM SẢN PHẨM VÀO GIỎ HÀNG
 // =========================================================================
@@ -533,12 +551,56 @@ app.delete('/api/cart/items/:productId', authMiddleware, async (req, res) => {
     }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-    return res.json({
-        service: "Cart Service",
-        status: "OK"
-    });
+// =========================================================================
+// INTERNAL ROUTE: XÓA TOÀN BỘ GIỎ HÀNG CỦA USER SAU KHI ORDER THÀNH CÔNG
+// =========================================================================
+app.delete('/api/cart/internal/users/:userId', internalMiddleware, async (req, res) => {
+    const { userId } = req.params;
+
+    if (!userId) {
+        return res.status(400).json({
+            error: "Thiếu userId!"
+        });
+    }
+
+    let connection;
+
+    try {
+        connection = await dbPool.getConnection();
+
+        const cart = await getCartByUserId(connection, userId);
+
+        if (!cart) {
+            return res.json({
+                message: "User chưa có cart, không cần dọn.",
+                deletedItems: 0
+            });
+        }
+
+        const [result] = await connection.execute(
+            `
+            DELETE FROM cart_items
+            WHERE cart_id = ?
+            `,
+            [cart.cart_id]
+        );
+
+        return res.json({
+            message: "Đã dọn giỏ hàng sau khi đặt hàng thành công.",
+            cartId: cart.cart_id,
+            deletedItems: result.affectedRows
+        });
+
+    } catch (error) {
+        console.error("Lỗi dọn giỏ hàng internal:", error);
+
+        return res.status(500).json({
+            error: error.message || "Không thể dọn giỏ hàng!"
+        });
+
+    } finally {
+        if (connection) connection.release();
+    }
 });
 
 // Khởi chạy Cart Service ở cổng 3002
