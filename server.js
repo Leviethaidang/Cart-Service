@@ -370,6 +370,7 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                 cart_item_id,
                 cart_id,
                 product_id,
+                variant_id,
                 quantity,
                 created_at,
                 updated_at
@@ -388,9 +389,35 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                     return {
                         cartItemId: item.cart_item_id,
                         productId: item.product_id,
+                        variantId: item.variant_id,
                         quantity: item.quantity,
                         productDeleted: true,
+                        variantDeleted: false,
                         product: null,
+                        variant: null,
+                        subtotal: 0
+                    };
+                }
+
+                const variant = findVariant(product, item.variant_id);
+
+                if (!variant) {
+                    return {
+                        cartItemId: item.cart_item_id,
+                        productId: item.product_id,
+                        variantId: item.variant_id,
+                        quantity: item.quantity,
+                        productDeleted: false,
+                        variantDeleted: true,
+                        product: {
+                            productId: product.product_id,
+                            productName: product.product_name,
+                            categoryId: product.category_id,
+                            categoryName: product.category_name,
+                            price: Number(product.price),
+                            imageUrl: product.imageUrl
+                        },
+                        variant: null,
                         subtotal: 0
                     };
                 }
@@ -401,8 +428,10 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                 return {
                     cartItemId: item.cart_item_id,
                     productId: item.product_id,
+                    variantId: item.variant_id,
                     quantity: item.quantity,
                     productDeleted: false,
+                    variantDeleted: false,
                     product: {
                         productId: product.product_id,
                         productName: product.product_name,
@@ -410,9 +439,18 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         categoryName: product.category_name,
                         description: product.description,
                         price,
-                        stockQuantity: product.stock_quantity,
                         soldQuantity: product.sold_quantity,
                         imageUrl: product.imageUrl
+                    },
+                    variant: {
+                        variantId: variant.variant_id,
+                        sizeId: variant.size_id,
+                        sizeName: variant.size_name,
+                        colorId: variant.color_id,
+                        colorName: variant.color_name,
+                        colorCode: variant.color_code,
+                        stockQuantity: variant.stock_quantity,
+                        soldQuantity: variant.sold_quantity
                     },
                     subtotal
                 };
@@ -420,6 +458,10 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
         );
 
         const totalQuantity = items.reduce((sum, item) => {
+            if (item.productDeleted || item.variantDeleted) {
+                return sum;
+            }
+
             return sum + Number(item.quantity || 0);
         }, 0);
 
@@ -453,17 +495,17 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
 // =========================================================================
 // ROUTE 3: CẬP NHẬT SỐ LƯỢNG SẢN PHẨM TRONG GIỎ
 // =========================================================================
-app.put('/api/cart/items/:productId', authMiddleware, async (req, res) => {
+app.put('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
     const userId = req.user.sub;
-    const { productId } = req.params;
+    const { cartItemId } = req.params;
     const { quantity } = req.body || {};
 
-    const parsedProductId = parsePositiveInteger(productId);
+    const parsedCartItemId = parsePositiveInteger(cartItemId);
     const parsedQuantity = parsePositiveInteger(quantity);
 
-    if (!parsedProductId) {
+    if (!parsedCartItemId) {
         return res.status(400).json({
-            error: "productId không hợp lệ!"
+            error: "cartItemId không hợp lệ!"
         });
     }
 
@@ -476,22 +518,6 @@ app.put('/api/cart/items/:productId', authMiddleware, async (req, res) => {
     let connection;
 
     try {
-        const product = await getProductById(parsedProductId);
-
-        if (!product) {
-            return res.status(404).json({
-                error: "Sản phẩm không tồn tại!"
-            });
-        }
-
-        const stockQuantity = Number(product.stock_quantity);
-
-        if (Number.isNaN(stockQuantity) || parsedQuantity > stockQuantity) {
-            return res.status(400).json({
-                error: `Số lượng vượt quá tồn kho. Tồn kho hiện tại: ${stockQuantity}`
-            });
-        }
-
         connection = await dbPool.getConnection();
 
         const cart = await getCartByUserId(connection, userId);
@@ -502,33 +528,82 @@ app.put('/api/cart/items/:productId', authMiddleware, async (req, res) => {
             });
         }
 
-        const [result] = await connection.execute(
+        const [itemRows] = await connection.execute(
             `
-            UPDATE cart_items
-            SET quantity = ?
-            WHERE cart_id = ? AND product_id = ?
+            SELECT
+                cart_item_id,
+                product_id,
+                variant_id,
+                quantity
+            FROM cart_items
+            WHERE cart_id = ? AND cart_item_id = ?
             `,
-            [parsedQuantity, cart.cart_id, parsedProductId]
+            [cart.cart_id, parsedCartItemId]
         );
 
-        if (result.affectedRows === 0) {
+        if (itemRows.length === 0) {
             return res.status(404).json({
                 error: "Sản phẩm này chưa có trong giỏ hàng!"
             });
         }
 
+        const item = itemRows[0];
+
+        const product = await getProductById(item.product_id);
+
+        if (!product) {
+            return res.status(404).json({
+                error: "Sản phẩm không tồn tại!"
+            });
+        }
+
+        const variant = findVariant(product, item.variant_id);
+
+        if (!variant) {
+            return res.status(404).json({
+                error: "Biến thể sản phẩm không tồn tại!"
+            });
+        }
+
+        const stockQuantity = Number(variant.stock_quantity);
+
+        if (Number.isNaN(stockQuantity) || parsedQuantity > stockQuantity) {
+            return res.status(400).json({
+                error: `Số lượng vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${stockQuantity}`
+            });
+        }
+
+        await connection.execute(
+            `
+            UPDATE cart_items
+            SET quantity = ?
+            WHERE cart_id = ? AND cart_item_id = ?
+            `,
+            [parsedQuantity, cart.cart_id, parsedCartItemId]
+        );
+
         return res.json({
             message: "Cập nhật số lượng sản phẩm trong giỏ hàng thành công!",
             item: {
                 cartId: cart.cart_id,
-                productId: parsedProductId,
+                cartItemId: parsedCartItemId,
+                productId: item.product_id,
+                variantId: item.variant_id,
                 quantity: parsedQuantity,
                 product: {
                     productId: product.product_id,
                     productName: product.product_name,
                     price: Number(product.price),
-                    stockQuantity: product.stock_quantity,
                     imageUrl: product.imageUrl
+                },
+                variant: {
+                    variantId: variant.variant_id,
+                    sizeId: variant.size_id,
+                    sizeName: variant.size_name,
+                    colorId: variant.color_id,
+                    colorName: variant.color_name,
+                    colorCode: variant.color_code,
+                    stockQuantity: variant.stock_quantity
                 }
             }
         });
