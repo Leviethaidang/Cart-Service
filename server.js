@@ -71,8 +71,18 @@ async function getProductById(productId) {
         throw new Error("Không thể kết nối Product Service!");
     }
 }
+// 6 Helper tìm variant trong product (nếu có)
+function findVariant(product, variantId) {
+    if (!product || !Array.isArray(product.variants)) {
+        return null;
+    }
 
-// 6. Helper lấy hoặc tạo cart cho user
+    return product.variants.find(variant => {
+        return Number(variant.variant_id) === Number(variantId);
+    }) || null;
+}
+
+// 7. Helper lấy hoặc tạo cart cho user
 async function getOrCreateCart(connection, userId) {
     await connection.execute(
         `
@@ -95,7 +105,7 @@ async function getOrCreateCart(connection, userId) {
     return rows[0];
 }
 
-// 7. Helper chỉ lấy cart, không tự tạo
+// 8. Helper chỉ lấy cart, không tự tạo
 async function getCartByUserId(connection, userId) {
     const [rows] = await connection.execute(
         `
@@ -109,7 +119,7 @@ async function getCartByUserId(connection, userId) {
     return rows.length > 0 ? rows[0] : null;
 }
 
-// 8. Middleware xác thực
+// 9. Middleware xác thực
 async function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization;
 
@@ -142,6 +152,7 @@ async function authMiddleware(req, res, next) {
     }
 }
 
+// 10. Middleware xác thực API nội bộ
 function internalMiddleware(req, res, next) {
     const internalApiKey = req.headers["x-internal-api-key"];
 
@@ -168,15 +179,23 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
 
     const {
         productId,
+        variantId,
         quantity = 1
     } = req.body || {};
 
     const parsedProductId = parsePositiveInteger(productId);
+    const parsedVariantId = parsePositiveInteger(variantId);
     const parsedQuantity = parsePositiveInteger(quantity);
 
     if (!parsedProductId) {
         return res.status(400).json({
             error: "productId không hợp lệ!"
+        });
+    }
+
+    if (!parsedVariantId) {
+        return res.status(400).json({
+            error: "variantId không hợp lệ!"
         });
     }
 
@@ -197,11 +216,25 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             });
         }
 
-        const stockQuantity = Number(product.stock_quantity);
+        const variant = findVariant(product, parsedVariantId);
+
+        if (!variant) {
+            return res.status(404).json({
+                error: "Biến thể sản phẩm không tồn tại!"
+            });
+        }
+
+        if (Number(variant.product_id) !== Number(product.product_id)) {
+            return res.status(400).json({
+                error: "Biến thể không thuộc sản phẩm này!"
+            });
+        }
+
+        const stockQuantity = Number(variant.stock_quantity);
 
         if (Number.isNaN(stockQuantity) || stockQuantity <= 0) {
             return res.status(400).json({
-                error: "Sản phẩm đã hết hàng!"
+                error: "Biến thể này đã hết hàng!"
             });
         }
 
@@ -214,10 +247,10 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             `
             SELECT cart_item_id, quantity
             FROM cart_items
-            WHERE cart_id = ? AND product_id = ?
+            WHERE cart_id = ? AND variant_id = ?
             FOR UPDATE
             `,
-            [cart.cart_id, parsedProductId]
+            [cart.cart_id, parsedVariantId]
         );
 
         const currentQuantity =
@@ -229,7 +262,7 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             await connection.rollback();
 
             return res.status(400).json({
-                error: `Số lượng trong giỏ vượt quá tồn kho. Tồn kho hiện tại: ${stockQuantity}`
+                error: `Số lượng trong giỏ vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${stockQuantity}`
             });
         }
 
@@ -238,17 +271,27 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
                 `
                 UPDATE cart_items
                 SET quantity = ?
-                WHERE cart_id = ? AND product_id = ?
+                WHERE cart_id = ? AND variant_id = ?
                 `,
-                [nextQuantity, cart.cart_id, parsedProductId]
+                [nextQuantity, cart.cart_id, parsedVariantId]
             );
         } else {
             await connection.execute(
                 `
-                INSERT INTO cart_items (cart_id, product_id, quantity)
-                VALUES (?, ?, ?)
+                INSERT INTO cart_items (
+                    cart_id,
+                    product_id,
+                    variant_id,
+                    quantity
+                )
+                VALUES (?, ?, ?, ?)
                 `,
-                [cart.cart_id, parsedProductId, parsedQuantity]
+                [
+                    cart.cart_id,
+                    parsedProductId,
+                    parsedVariantId,
+                    parsedQuantity
+                ]
             );
         }
 
@@ -259,12 +302,21 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             item: {
                 cartId: cart.cart_id,
                 productId: parsedProductId,
+                variantId: parsedVariantId,
                 quantity: nextQuantity,
+                variant: {
+                    variantId: variant.variant_id,
+                    sizeId: variant.size_id,
+                    sizeName: variant.size_name,
+                    colorId: variant.color_id,
+                    colorName: variant.color_name,
+                    colorCode: variant.color_code,
+                    stockQuantity: variant.stock_quantity
+                },
                 product: {
                     productId: product.product_id,
                     productName: product.product_name,
                     price: Number(product.price),
-                    stockQuantity: product.stock_quantity,
                     imageUrl: product.imageUrl
                 }
             }
@@ -496,15 +548,15 @@ app.put('/api/cart/items/:productId', authMiddleware, async (req, res) => {
 // =========================================================================
 // ROUTE 4: XÓA SẢN PHẨM KHỎI GIỎ
 // =========================================================================
-app.delete('/api/cart/items/:productId', authMiddleware, async (req, res) => {
+app.delete('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
     const userId = req.user.sub;
-    const { productId } = req.params;
+    const { cartItemId } = req.params;
 
-    const parsedProductId = parsePositiveInteger(productId);
+    const parsedCartItemId = parsePositiveInteger(cartItemId);
 
-    if (!parsedProductId) {
+    if (!parsedCartItemId) {
         return res.status(400).json({
-            error: "productId không hợp lệ!"
+            error: "cartItemId không hợp lệ!"
         });
     }
 
@@ -524,9 +576,9 @@ app.delete('/api/cart/items/:productId', authMiddleware, async (req, res) => {
         const [result] = await connection.execute(
             `
             DELETE FROM cart_items
-            WHERE cart_id = ? AND product_id = ?
+            WHERE cart_id = ? AND cart_item_id = ?
             `,
-            [cart.cart_id, parsedProductId]
+            [cart.cart_id, parsedCartItemId]
         );
 
         if (result.affectedRows === 0) {
