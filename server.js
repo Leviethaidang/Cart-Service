@@ -315,9 +315,9 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             });
         }
 
-        const stockQuantity = Number(inventory.quantity_available || 0);
+        const availableQuantity = Number(inventory.quantity_available || 0);
 
-        if (stockQuantity <= 0) {
+        if (availableQuantity <= 0) {
             return res.status(400).json({
                 error: "Biến thể này đã hết hàng!"
             });
@@ -343,11 +343,11 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
 
         const nextQuantity = currentQuantity + parsedQuantity;
 
-        if (nextQuantity > stockQuantity) {
+        if (nextQuantity > availableQuantity) {
             await connection.rollback();
 
             return res.status(400).json({
-                error: `Số lượng trong giỏ vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${stockQuantity}`
+                error: `Số lượng trong giỏ vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${availableQuantity}`
             });
         }
 
@@ -405,13 +405,9 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
                     colorId: variant.color_id,
                     colorName: variant.color_name,
                     colorCode: variant.color_code,
-
-                    // Giữ tên stockQuantity để FE cũ vẫn dùng được,
-                    // nhưng dữ liệu thật lấy từ Inventory Service.
-                    stockQuantity,
                     quantityOnHand: Number(inventory.quantity_on_hand || 0),
                     quantityReserved: Number(inventory.quantity_reserved || 0),
-                    quantityAvailable: stockQuantity
+                    quantityAvailable: availableQuantity
                 }
             }
         });
@@ -525,7 +521,7 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                 }
 
                 const inventory = inventoryMap.get(Number(item.variant_id));
-                const stockQuantity = Number(inventory?.quantity_available || 0);
+                const availableQuantity = Number(inventory?.quantity_available || 0);
 
                 const price = Number(product.price);
                 const subtotal = price * Number(item.quantity);
@@ -554,12 +550,9 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         colorId: variant.color_id,
                         colorName: variant.color_name,
                         colorCode: variant.color_code,
-
-                        // Dữ liệu tồn kho lấy từ Inventory Service.
-                        stockQuantity,
                         quantityOnHand: Number(inventory?.quantity_on_hand || 0),
                         quantityReserved: Number(inventory?.quantity_reserved || 0),
-                        quantityAvailable: stockQuantity
+                        quantityAvailable: availableQuantity
                     },
                     subtotal
                 };
@@ -601,9 +594,6 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
     }
 });
 
-// =========================================================================
-// ROUTE 3: CẬP NHẬT SỐ LƯỢNG SẢN PHẨM TRONG GIỎ
-// =========================================================================
 // =========================================================================
 // ROUTE 3: CẬP NHẬT SỐ LƯỢNG SẢN PHẨM TRONG GIỎ
 // =========================================================================
@@ -685,11 +675,11 @@ app.put('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
             });
         }
 
-        const stockQuantity = Number(inventory.quantity_available || 0);
+        const availableQuantity = Number(inventory.quantity_available || 0);
 
-        if (parsedQuantity > stockQuantity) {
+        if (parsedQuantity > availableQuantity) {
             return res.status(400).json({
-                error: `Số lượng vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${stockQuantity}`
+                error: `Số lượng vượt quá số lượng còn lại của biến thể. Hiện tại còn: ${availableQuantity}`
             });
         }
 
@@ -723,12 +713,9 @@ app.put('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
                     colorId: variant.color_id,
                     colorName: variant.color_name,
                     colorCode: variant.color_code,
-
-                    // Dữ liệu tồn kho lấy từ Inventory Service.
-                    stockQuantity,
                     quantityOnHand: Number(inventory.quantity_on_hand || 0),
                     quantityReserved: Number(inventory.quantity_reserved || 0),
-                    quantityAvailable: stockQuantity
+                    quantityAvailable: availableQuantity
                 }
             }
         });
