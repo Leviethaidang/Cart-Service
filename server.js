@@ -730,8 +730,8 @@ app.delete('/api/cart/internal/users/:userId', internalMiddleware, async (req, r
     }
 });
 
-// Khởi chạy Cart Service ở cổng 3002
-const PORT = process.env.PORT || 3002;
+// Khởi chạy Cart Service ở cổng 3003
+const PORT = process.env.PORT || 3003;
 
 app.listen(PORT, () => {
     console.log(`Cart Service running on port ${PORT}`);
