@@ -119,6 +119,83 @@ async function getCartByUserId(connection, userId) {
     return rows.length > 0 ? rows[0] : null;
 }
 
+function getInventoryServiceUrl() {
+    const inventoryServiceUrl = process.env.INVENTORY_SERVICE_URL;
+
+    if (!inventoryServiceUrl) {
+        throw new Error("Thiếu INVENTORY_SERVICE_URL trong file .env");
+    }
+
+    return inventoryServiceUrl.replace(/\/$/, '');
+}
+
+async function getInventoryByVariantId(variantId) {
+    try {
+        const baseUrl = getInventoryServiceUrl();
+
+        const response = await axios.get(`${baseUrl}/api/inventory/variants/${variantId}`, {
+            timeout: 5000
+        });
+
+        return response.data.inventory;
+
+    } catch (error) {
+        if (error.response && error.response.status === 404) {
+            return null;
+        }
+
+        console.error(
+            "Lỗi gọi Inventory Service:",
+            error.response?.data || error.message
+        );
+
+        throw new Error("Không thể kết nối Inventory Service!");
+    }
+}
+
+async function getInventoryMapByVariantIds(variantIds) {
+    const cleanVariantIds = [...new Set(
+        (variantIds || [])
+            .map(id => Number(id))
+            .filter(id => Number.isInteger(id) && id > 0)
+    )];
+
+    if (cleanVariantIds.length === 0) {
+        return new Map();
+    }
+
+    try {
+        const baseUrl = getInventoryServiceUrl();
+
+        const response = await axios.post(
+            `${baseUrl}/api/inventory/variants/batch`,
+            {
+                variantIds: cleanVariantIds
+            },
+            {
+                timeout: 5000
+            }
+        );
+
+        const inventories = response.data.inventories || [];
+        const inventoryMap = new Map();
+
+        for (const inventory of inventories) {
+            inventoryMap.set(Number(inventory.variant_id), inventory);
+        }
+
+        return inventoryMap;
+
+    } catch (error) {
+        console.error(
+            "Lỗi gọi Inventory Service batch:",
+            error.response?.data || error.message
+        );
+
+        throw new Error("Không thể kết nối Inventory Service!");
+    }
+}
+
 // 9. Middleware xác thực
 async function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization;
@@ -220,7 +297,7 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
 
         if (!variant) {
             return res.status(404).json({
-                error: "Biến thể sản phẩm không tồn tại!"
+                error: "Biến thể sản phẩm không tồn tại hoặc đã ngừng bán!"
             });
         }
 
@@ -230,9 +307,17 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
             });
         }
 
-        const stockQuantity = Number(variant.stock_quantity);
+        const inventory = await getInventoryByVariantId(parsedVariantId);
 
-        if (Number.isNaN(stockQuantity) || stockQuantity <= 0) {
+        if (!inventory) {
+            return res.status(400).json({
+                error: "Biến thể này chưa có tồn kho hoặc đã ngừng bán!"
+            });
+        }
+
+        const stockQuantity = Number(inventory.quantity_available || 0);
+
+        if (stockQuantity <= 0) {
             return res.status(400).json({
                 error: "Biến thể này đã hết hàng!"
             });
@@ -304,6 +389,15 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
                 productId: parsedProductId,
                 variantId: parsedVariantId,
                 quantity: nextQuantity,
+                product: {
+                    productId: product.product_id,
+                    productName: product.product_name,
+                    categoryId: product.category_id,
+                    categoryName: product.category_name,
+                    description: product.description,
+                    price: Number(product.price),
+                    imageUrl: product.imageUrl
+                },
                 variant: {
                     variantId: variant.variant_id,
                     sizeId: variant.size_id,
@@ -311,13 +405,13 @@ app.post('/api/cart/items', authMiddleware, async (req, res) => {
                     colorId: variant.color_id,
                     colorName: variant.color_name,
                     colorCode: variant.color_code,
-                    stockQuantity: variant.stock_quantity
-                },
-                product: {
-                    productId: product.product_id,
-                    productName: product.product_name,
-                    price: Number(product.price),
-                    imageUrl: product.imageUrl
+
+                    // Giữ tên stockQuantity để FE cũ vẫn dùng được,
+                    // nhưng dữ liệu thật lấy từ Inventory Service.
+                    stockQuantity,
+                    quantityOnHand: Number(inventory.quantity_on_hand || 0),
+                    quantityReserved: Number(inventory.quantity_reserved || 0),
+                    quantityAvailable: stockQuantity
                 }
             }
         });
@@ -381,6 +475,12 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
             [cart.cart_id]
         );
 
+        const variantIds = cartItemRows
+            .map(item => item.variant_id)
+            .filter(Boolean);
+
+        const inventoryMap = await getInventoryMapByVariantIds(variantIds);
+
         const items = await Promise.all(
             cartItemRows.map(async (item) => {
                 const product = await getProductById(item.product_id);
@@ -393,6 +493,7 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         quantity: item.quantity,
                         productDeleted: true,
                         variantDeleted: false,
+                        inventoryMissing: true,
                         product: null,
                         variant: null,
                         subtotal: 0
@@ -409,6 +510,7 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         quantity: item.quantity,
                         productDeleted: false,
                         variantDeleted: true,
+                        inventoryMissing: true,
                         product: {
                             productId: product.product_id,
                             productName: product.product_name,
@@ -422,6 +524,9 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                     };
                 }
 
+                const inventory = inventoryMap.get(Number(item.variant_id));
+                const stockQuantity = Number(inventory?.quantity_available || 0);
+
                 const price = Number(product.price);
                 const subtotal = price * Number(item.quantity);
 
@@ -432,6 +537,7 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                     quantity: item.quantity,
                     productDeleted: false,
                     variantDeleted: false,
+                    inventoryMissing: !inventory,
                     product: {
                         productId: product.product_id,
                         productName: product.product_name,
@@ -439,7 +545,6 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         categoryName: product.category_name,
                         description: product.description,
                         price,
-                        soldQuantity: product.sold_quantity,
                         imageUrl: product.imageUrl
                     },
                     variant: {
@@ -449,8 +554,12 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
                         colorId: variant.color_id,
                         colorName: variant.color_name,
                         colorCode: variant.color_code,
-                        stockQuantity: variant.stock_quantity,
-                        soldQuantity: variant.sold_quantity
+
+                        // Dữ liệu tồn kho lấy từ Inventory Service.
+                        stockQuantity,
+                        quantityOnHand: Number(inventory?.quantity_on_hand || 0),
+                        quantityReserved: Number(inventory?.quantity_reserved || 0),
+                        quantityAvailable: stockQuantity
                     },
                     subtotal
                 };
@@ -492,6 +601,9 @@ app.get('/api/cart', authMiddleware, async (req, res) => {
     }
 });
 
+// =========================================================================
+// ROUTE 3: CẬP NHẬT SỐ LƯỢNG SẢN PHẨM TRONG GIỎ
+// =========================================================================
 // =========================================================================
 // ROUTE 3: CẬP NHẬT SỐ LƯỢNG SẢN PHẨM TRONG GIỎ
 // =========================================================================
@@ -561,13 +673,21 @@ app.put('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
 
         if (!variant) {
             return res.status(404).json({
-                error: "Biến thể sản phẩm không tồn tại!"
+                error: "Biến thể sản phẩm không tồn tại hoặc đã ngừng bán!"
             });
         }
 
-        const stockQuantity = Number(variant.stock_quantity);
+        const inventory = await getInventoryByVariantId(item.variant_id);
 
-        if (Number.isNaN(stockQuantity) || parsedQuantity > stockQuantity) {
+        if (!inventory) {
+            return res.status(400).json({
+                error: "Biến thể này chưa có tồn kho hoặc đã ngừng bán!"
+            });
+        }
+
+        const stockQuantity = Number(inventory.quantity_available || 0);
+
+        if (parsedQuantity > stockQuantity) {
             return res.status(400).json({
                 error: `Số lượng vượt quá tồn kho của biến thể. Tồn kho hiện tại: ${stockQuantity}`
             });
@@ -603,7 +723,12 @@ app.put('/api/cart/items/:cartItemId', authMiddleware, async (req, res) => {
                     colorId: variant.color_id,
                     colorName: variant.color_name,
                     colorCode: variant.color_code,
-                    stockQuantity: variant.stock_quantity
+
+                    // Dữ liệu tồn kho lấy từ Inventory Service.
+                    stockQuantity,
+                    quantityOnHand: Number(inventory.quantity_on_hand || 0),
+                    quantityReserved: Number(inventory.quantity_reserved || 0),
+                    quantityAvailable: stockQuantity
                 }
             }
         });
